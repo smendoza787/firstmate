@@ -173,6 +173,26 @@ test_fresh_worktree_is_trusted() {
   pass "fm-claude-trust.sh: a fresh task worktree is trusted"
 }
 
+# fm-spawn.sh --worktree adopts an externally owned linked worktree, such as a
+# Garden sprout that lives far from its repository checkout on its own branch.
+# It is the same structural shape as a pool slot, so it is trusted as this
+# project's own isolated worktree.
+test_external_garden_sprout_is_trusted() {
+  local case_dir repo sprout config out
+  case_dir="$TMP_ROOT/garden-sprout"
+  repo="$case_dir/garden/repos/app"
+  sprout="$case_dir/garden/plots/plot/worktrees/sprout/app"
+  config="$case_dir/claude-config"
+  mkdir -p "$config" "$(dirname "$repo")" "$(dirname "$sprout")"
+  fm_git_init_commit "$repo"
+  git -C "$repo" worktree add --quiet -b sprout/work "$sprout"
+  out=$(run_trust "$config" "$sprout" "$repo")
+  expect_code 0 $? "an external sprout worktree of the project must be trusted: $out"
+  assert_trusted "$config/.claude.json" "$sprout" "the sprout was not recorded as trusted"
+  assert_trusted "$config/.claude.json" "$repo" "the sprout's repository checkout was not recorded as trusted"
+  pass "fm-claude-trust.sh: an external Garden-sprout worktree of the project is trusted"
+}
+
 # The trust dialog is read only from the PROJECT-root entry, never the
 # worktree entry (Claude Code's own git-root canonicalization collapses every
 # linked worktree to its primary checkout for that check, with no
@@ -841,6 +861,7 @@ test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded() {
 }
 
 test_fresh_worktree_is_trusted
+test_external_garden_sprout_is_trusted
 test_fresh_worktree_also_trusts_the_project_root_without_import_consent
 test_registration_carries_forward_existing_import_consent
 test_project_root_entry_preserves_other_keys

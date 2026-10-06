@@ -3964,6 +3964,83 @@ test_leaked_worktree_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's worktree is reaped by teardown, not left surviving"
 }
 
+# An externally owned worktree (fm-spawn.sh --worktree, worktree_owner=external)
+# belongs to its owner, so a landed teardown removes only the Firstmate hook
+# files and leaves the copy, its HEAD, its branch, and the owner's processes.
+add_logging_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$case_dir/treehouse.log'
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+test_external_worktree_landed_teardown_leaves_it_in_place() {
+  local case_dir rc=0 head pid exclude
+  case_dir=$(make_case external-landed)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' "worktree_owner=external" >> "$case_dir/state/task-x1.meta"
+  add_logging_treehouse "$case_dir"
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  # The spawn writes these hook files and keeps them out of git's view.
+  exclude=$(git -C "$case_dir/wt" rev-parse --path-format=absolute --git-path info/exclude)
+  mkdir -p "$(dirname "$exclude")" "$case_dir/wt/.claude"
+  printf '%s\n' .claude/settings.local.json .fm-grok-turnend >> "$exclude"
+  printf '{}\n' > "$case_dir/wt/.claude/settings.local.json"
+  printf 'token=x\n' > "$case_dir/wt/.fm-grok-turnend"
+  # An owner's own process rooted in the copy must survive the cleanup.
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "external-landed: setup sleeper did not start"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "external-landed: teardown killed the owner's process in the external worktree"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  expect_code 0 "$rc" "external-landed: teardown of a landed external task should succeed"$'\n'"$(cat "$case_dir/stderr")"
+  [ -d "$case_dir/wt" ] || fail "external-landed: teardown removed the external worktree"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)" = fm/task-x1 ] \
+    || fail "external-landed: teardown detached or switched the external worktree's HEAD"
+  [ "$(git -C "$case_dir/wt" rev-parse HEAD)" = "$head" ] \
+    || fail "external-landed: teardown moved the external worktree's HEAD"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "external-landed: teardown deleted the external worktree's branch"
+  assert_absent "$case_dir/wt/.claude/settings.local.json" \
+    "external-landed: teardown left the Firstmate claude hook file"
+  assert_absent "$case_dir/wt/.fm-grok-turnend" \
+    "external-landed: teardown left the Firstmate grok hook file"
+  assert_absent "$case_dir/treehouse.log" "external-landed: teardown ran treehouse on an external worktree"
+  assert_grep "externally owned; left in place for its owner to remove" "$case_dir/stdout" \
+    "external-landed: teardown did not say the worktree was left for its owner"
+  assert_absent "$case_dir/state/task-x1.meta" "external-landed: teardown kept the task record"
+  pass "a landed external-worktree task is cleaned up without touching the owner's copy, branch, or processes"
+}
+
+test_external_worktree_unlanded_teardown_still_refuses() {
+  local case_dir rc=0 head
+  case_dir=$(make_case external-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' "worktree_owner=external" >> "$case_dir/state/task-x1.meta"
+  add_logging_treehouse "$case_dir"
+  wt_commit_file "$case_dir" feature.txt hello "unpushed work"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "external-unlanded: teardown should refuse unlanded work"
+  grep -q REFUSED "$case_dir/stderr" || fail "external-unlanded: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" external-unlanded "$head"
+  assert_absent "$case_dir/treehouse.log" "external-unlanded: teardown ran treehouse on an external worktree"
+  pass "an external-worktree task with unlanded work still refuses teardown without --force"
+}
+
 test_leaked_tasktmp_process_is_reaped() {
   local case_dir rc pid
   case_dir=$(make_case leaked-tasktmp-reap)
@@ -4607,3 +4684,5 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_external_worktree_landed_teardown_leaves_it_in_place
+test_external_worktree_unlanded_teardown_still_refuses

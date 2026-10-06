@@ -93,6 +93,16 @@
 # name a live quarantined space and is retained for that sweep.
 # data/<id>/ is deliberately left in place: a successor spawn reads brief.md
 # from it.
+# A record with worktree_owner=external names a worktree bin/fm-spawn.sh
+# --worktree adopted from its owner (for example a Garden sprout). Every
+# landed-work and safety refusal applies exactly as for any task, so unlanded
+# work still refuses without --force. Cleanup then removes only the
+# Firstmate-written hook files from it and prints that the worktree was left in
+# place for its owner: it never detaches HEAD, deletes the branch, runs
+# treehouse return, touches a slot claim, reaps processes by worktree cwd (the
+# owner's own processes live there; only the task's tasktmp is reaped), or
+# fleet-syncs the project, which is the owner's repository checkout. The
+# endpoint close and every record and backlog step run as usual.
 # Worktree-slot ownership (teardown-slot-collision): a treehouse pool slot is
 # reused across tasks, so a stale, duplicated, or drifted worktree= record can
 # name a slot a DIFFERENT live task now holds. Cleanup kills every process under
@@ -283,7 +293,8 @@
 #     grace period to any survivor whose process identity still matches. Both
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
-#     processes. Idempotent: nothing left to find is a silent no-op.
+#     processes. An externally owned worktree is not such a root and is
+#     never scanned (see worktree_owner=external above). Idempotent: nothing left to find is a silent no-op.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -1167,6 +1178,13 @@ fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 BASE_BRANCH=$(grep '^base_branch=' "$META" | cut -d= -f2- || true)
+# worktree_owner=external marks a copy fm-spawn.sh --worktree adopted from its
+# owner (see the header): every landed-work refusal still applies, but nothing
+# below detaches, deletes, resets, returns, or reaps that owner's copy.
+WORKTREE_OWNER=$(fm_meta_get "$META" worktree_owner)
+teardown_worktree_external() {
+  [ "$WORKTREE_OWNER" = external ] && [ "$KIND" != secondmate ]
+}
 
 # A record accepted as a legacy incarnation (no spawn_gen, and either
 # --legacy-record given or the record is windowless) may be torn down only
@@ -3585,7 +3603,13 @@ fi
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
-if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
+if teardown_worktree_external; then
+  # The owner's own shells, editors, and servers live in an external worktree,
+  # so it is not a per-task root Fix 2 may reap; only the task's own parked run
+  # and its tasktmp are concluded.
+  conclude_task_no_mistakes_run "$WT"
+  reap_task_worktree_processes tasktmp "$TASK_TMP"
+elif [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 elif [ "$KIND" != secondmate ]; then
@@ -3625,6 +3649,15 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
+elif teardown_worktree_external; then
+  # Externally owned: drop only the Firstmate-written hook files, and leave the
+  # worktree, its HEAD, and its branch for the owner; no treehouse return and
+  # no slot claim, because no pool slot was ever taken.
+  if [ -d "$WT" ]; then
+    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+      "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+  fi
+  echo "teardown: worktree $WT is externally owned; left in place for its owner to remove"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
@@ -3870,7 +3903,10 @@ else
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
-if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
+# An external worktree's project is its owner's repository checkout, not a
+# Firstmate clone, so it is never fast-forwarded or branch-pruned from here.
+if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ] \
+   && ! teardown_worktree_external; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 # A secondmate retirement may remove the home containing an overridden control

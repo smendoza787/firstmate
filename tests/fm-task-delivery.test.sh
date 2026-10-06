@@ -436,6 +436,33 @@ test_promotion_persists_the_selected_ship_branch() {
   pass "fm-promote: a selected branch prefix reaches both worker instructions and durable task state"
 }
 
+# A scout launched into an externally owned worktree (fm-spawn.sh --worktree)
+# keeps its owner's commits on promotion: the record stays external and the
+# worker is told to branch from the current HEAD rather than return to a base.
+test_promotion_of_an_external_worktree_never_resets_it() {
+  local home id meta instructions out
+  home="$TMP_ROOT/promote-external/home"
+  id=promote-external-e1
+  meta="$home/state/$id.meta"
+  mkdir -p "$home/state"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nworktree_owner=external\n' "$id" > "$meta"
+  FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
+    || fail "external promotion scout brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    "Promote the external fixture." "Keep the owner's commits."
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode direct-PR --yolo off) \
+    || fail "external promotion should succeed: $out"
+  instructions="$home/data/$id/ship-instructions.md"
+  assert_grep "worktree_owner=external" "$meta" \
+    "promotion dropped the external worktree owner from the task record"
+  assert_grep "create your branch from its current HEAD: \`git checkout -b fm/$id --\`" "$instructions" \
+    "promotion did not tell the worker to branch from the external worktree's HEAD"
+  assert_no_grep "Return to a clean" "$instructions" \
+    "promotion told the worker to return an external worktree to a base"
+  pass "fm-promote: an external-worktree scout is promoted without resetting the owner's copy"
+}
+
 # The promotion instructions embed the branch in the `git checkout -b` command
 # the worker executes, so a ref-format-valid metacharacter prefix must stay
 # literal there, exactly as it does in a generated ship brief.
@@ -1634,6 +1661,7 @@ test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_promotion_persists_the_selected_ship_branch
 test_promotion_branch_command_is_shell_safe
+test_promotion_of_an_external_worktree_never_resets_it
 test_local_merge_uses_the_recorded_ship_branch
 test_project_mode_matches_whole_multiword_names
 test_project_mode_maps_the_conditional_policy

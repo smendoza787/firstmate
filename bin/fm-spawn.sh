@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--worktree <path>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--worktree <path>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -48,6 +48,22 @@
 #   base_branch= in state/<id>.meta, which a relaunch reuses and later review and
 #   cleanup read; it is refused on secondmates and relaunches, and without it
 #   nothing changes.
+#   --worktree <path> adopts an existing, externally owned linked worktree of
+#   the spawning project's repository (for example a Garden sprout) as a fresh
+#   ship or scout task's worktree instead of acquiring one with `treehouse get`.
+#   <project-dir> must then be a checkout of that same repository. The spawn
+#   refuses unless the path is a readable worktree root that is neither the
+#   project nor the repository's primary checkout, shares the project's git
+#   common dir, has no uncommitted changes, holds none of the per-task hook
+#   files spawn writes and teardown removes (such as .claude/settings.local.json),
+#   and is not already recorded as another task's worktree in this home. It is refused with --relaunch (which
+#   reuses the recorded worktree), --secondmate, batch pairs, and backend=orca
+#   (Orca creates its own worktree). The adopted copy claims no pool slot and
+#   is never reset or refreshed to origin, so its commits and branch stay as
+#   its owner left them; --base-branch is only recorded. The task record gains
+#   worktree_owner=external, which a relaunch preserves, and bin/fm-teardown.sh
+#   then leaves the worktree, its HEAD, and its branch in place for its owner to
+#   remove. Without --worktree nothing changes, including the task record.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
@@ -674,6 +690,8 @@ YOLO_SET=0
 BRANCH_PREFIX_SET=0
 BASE_BRANCH=
 BASE_BRANCH_SET=0
+WORKTREE_ARG=
+WORKTREE_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
 POS=()
@@ -718,6 +736,10 @@ for a in "$@"; do
     base-branch)
       BASE_BRANCH=$a
       BASE_BRANCH_SET=1
+      ;;
+    worktree)
+      WORKTREE_ARG=$a
+      WORKTREE_SET=1
       ;;
     traceparent)
       TRACEPARENT_ARG=$a
@@ -781,6 +803,11 @@ for a in "$@"; do
     BASE_BRANCH=${a#--base-branch=}
     BASE_BRANCH_SET=1
     ;;
+  --worktree) want_value=worktree ;;
+  --worktree=*)
+    WORKTREE_ARG=${a#--worktree=}
+    WORKTREE_SET=1
+    ;;
   --traceparent) want_value=traceparent ;;
   --traceparent=*)
     TRACEPARENT_ARG=${a#--traceparent=}
@@ -819,6 +846,10 @@ done
 }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || {
   echo "error: --traceparent requires a non-empty value" >&2
+  exit 1
+}
+[ "$WORKTREE_SET" -eq 0 ] || [ -n "$WORKTREE_ARG" ] || {
+  echo "error: --worktree requires a non-empty value" >&2
   exit 1
 }
 # A parent-delivered carrier replaces this home's own resolution, so it is
@@ -871,6 +902,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch reuses the task's recorded base branch; --base-branch cannot override it" >&2
     exit 1
   }
+  [ "$WORKTREE_SET" -eq 0 ] || {
+    echo "error: --relaunch reuses the task's recorded worktree; --worktree cannot override it" >&2
+    exit 1
+  }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -918,6 +953,10 @@ else
     }
     [ "$KIND" != secondmate ] || [ "$BASE_BRANCH_SET" -eq 0 ] || {
       echo "error: --base-branch applies only to ship and scout spawns; a secondmate charter has no task base" >&2
+      exit 1
+    }
+    [ "$KIND" != secondmate ] || [ "$WORKTREE_SET" -eq 0 ] || {
+      echo "error: --worktree applies only to ship and scout spawns; a secondmate runs in its own firstmate home" >&2
       exit 1
     }
   fi
@@ -1485,6 +1524,10 @@ if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart"
   exit 1
 fi
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac then
+  if [ "$WORKTREE_SET" -eq 1 ]; then
+    echo "error: --worktree adopts one existing worktree for one task; spawn each task explicitly" >&2
+    exit 1
+  fi
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
@@ -1695,6 +1738,10 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fi
   if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
     echo "error: backend=cmux does not support --secondmate spawns yet" >&2
+    exit 1
+  fi
+  if [ "$BACKEND" = orca ] && [ "$WORKTREE_SET" -eq 1 ]; then
+    echo "error: --worktree cannot be used with backend=orca; Orca creates and owns its own task worktree" >&2
     exit 1
   fi
   if [ "$BACKEND" = orca ]; then
@@ -3050,7 +3097,7 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$WORKTREE_SET" -eq 0 ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
     exit 1
@@ -3573,6 +3620,51 @@ fi
 if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   echo "error: task $ID has a pending authoritative backlog close at $STATE/$ID.backlog-close; finish or repair that close before dispatching a new worker" >&2
   exit 1
+fi
+
+# --worktree adoption (see header): prove the externally owned copy is safe to
+# launch into before any endpoint exists, so a refusal leaves nothing to undo.
+EXTERNAL_WT=
+if [ "$WORKTREE_SET" -eq 1 ]; then
+  if ! spawn_worktree_isolated "$WORKTREE_ARG"; then
+    echo "error: --worktree '$WORKTREE_ARG' is not an isolated worktree of $PROJ_ABS: $SPAWN_WT_REASON" >&2
+    exit 1
+  fi
+  EXTERNAL_WT=$(cd "$WORKTREE_ARG" && pwd -P)
+  external_common=$(git -C "$EXTERNAL_WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
+    external_common=$(cd "$external_common" 2>/dev/null && pwd -P) || external_common=
+  project_common=$(git -C "$PROJ_ABS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
+    project_common=$(cd "$project_common" 2>/dev/null && pwd -P) || project_common=
+  if [ -z "$external_common" ] || [ "$external_common" != "$project_common" ]; then
+    echo "error: --worktree '$EXTERNAL_WT' is not a worktree of the same repository as $PROJ_ABS (its git common dir is '${external_common:-unresolved}', the project's is '${project_common:-unresolved}')" >&2
+    exit 1
+  fi
+  if ! external_status=$(git -C "$EXTERNAL_WT" -c core.quotePath=false status --porcelain); then
+    echo "error: could not inspect --worktree '$EXTERNAL_WT' for uncommitted work" >&2
+    exit 1
+  fi
+  if [ -n "$external_status" ]; then
+    echo "error: --worktree '$EXTERNAL_WT' has uncommitted work; refusing to launch a worker over it" >&2
+    exit 1
+  fi
+  # Spawn writes these per-task hook files and teardown deletes them, so an
+  # owner's own copy (ignored files never show in the status above) would be
+  # overwritten and then removed.
+  for external_hook in .claude/settings.local.json .opencode/plugins/fm-turn-end.js \
+    .opencode/plugins/fm-busy-state.js .fm-grok-turnend .fm-kimi-turnend; do
+    if [ -e "$EXTERNAL_WT/$external_hook" ] || [ -L "$EXTERNAL_WT/$external_hook" ]; then
+      echo "error: --worktree '$EXTERNAL_WT' already has $external_hook, which this spawn would overwrite and teardown would delete; refusing to touch the owner's file" >&2
+      exit 1
+    fi
+  done
+  for external_other in "$STATE"/*.meta; do
+    [ -f "$external_other" ] || continue
+    external_other_wt=$(fm_meta_get "$external_other" worktree)
+    [ -n "$external_other_wt" ] || continue
+    [ "$(real_path_or_raw "$external_other_wt")" = "$EXTERNAL_WT" ] || continue
+    echo "error: --worktree '$EXTERNAL_WT' is already task $(basename "$external_other" .meta)'s recorded worktree; refusing to launch a second worker into it" >&2
+    exit 1
+  done
 fi
 
 W="fm-$ID"
@@ -4306,6 +4398,12 @@ elif [ "$RELAUNCH" -eq 1 ]; then
     fi
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
+elif [ -n "$EXTERNAL_WT" ]; then
+  # An adopted external worktree is entered by spawn_enter_recorded_worktree
+  # below, exactly like a recorded one: no treehouse get, and no pool slot to
+  # claim, because the copy belongs to its owner rather than to a pool.
+  WT=$EXTERNAL_WT
+  validate_spawn_worktree "--worktree" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
@@ -4388,7 +4486,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     SPAWN_SLOT_CLAIMED=1
   fi
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+# An external worktree is never refreshed: the refresh resets the copy to
+# origin/<base>, which would discard the owner's commits, and its owner chose
+# its base.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ -z "$EXTERNAL_WT" ]; then
   freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" || exit 1
 fi
 
@@ -4966,6 +5067,9 @@ preserve_relaunch_meta() {
   [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"
   echo "tasktmp=$TASK_TMP"
   [ -z "$BASE_BRANCH" ] || echo "base_branch=$BASE_BRANCH"
+  # Only an adopted --worktree writes this line, so every other record stays
+  # byte-identical; a relaunch preserves it because it is not relaunch-owned.
+  [ -z "${EXTERNAL_WT:-}" ] || echo "worktree_owner=external"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   # The worker account pin, only when this home declares one, so an unpinned
